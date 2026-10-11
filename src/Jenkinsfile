@@ -1,0 +1,66 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_HUB_REPO = 'sunilpatra27/graphql'
+        IMAGE_TAG       = "${BUILD_NUMBER}"
+        DOCKER_CREDS_ID = 'docker-hub-credentials'
+        KUBECONFIG_ID   = 'k8s-kubeconfig'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Compile & Test') {
+            steps {
+                sh './mvnw clean package -DskipTests'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${DOCKER_HUB_REPO}:${IMAGE_TAG} ."
+                sh "docker tag ${DOCKER_HUB_REPO}:${IMAGE_TAG} ${DOCKER_HUB_REPO}:latest"
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDS_ID}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
+                    sh "docker push ${DOCKER_HUB_REPO}:${IMAGE_TAG}"
+                    sh "docker push ${DOCKER_HUB_REPO}:latest"
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withKubeConfig([credentialsId: "${KUBECONFIG_ID}"]) {
+                    // Apply Deployment & Service manifests
+                    sh 'kubectl apply -f k8s-deployment.yaml'
+                    // Update the image dynamically to match this build
+                    sh "kubectl set image deployment/graphql-app graphql-app=${DOCKER_HUB_REPO}:${IMAGE_TAG}"
+                    // Verify the rollout completes successfully
+                    sh 'kubectl rollout status deployment/graphql-app --timeout=90s'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Deployment successful! Pods updated to tag: ${IMAGE_TAG}"
+        }
+        failure {
+            echo "Pipeline failed. Check stage logs for details."
+        }
+        always {
+            sh 'docker image prune -f'
+        }
+    }
+}
